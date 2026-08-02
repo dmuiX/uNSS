@@ -20,7 +20,7 @@ BUILD		:=	build
 SOURCES		:=	source source/gui
 DATA		:=	data
 INCLUDES	:=	include
-#ROMFS	:=	romfs
+ROMFS	:=	romfs
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -134,14 +134,48 @@ ifneq ($(ROMFS),)
 	export NROFLAGS += --romfsdir=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: $(BUILD) clean all
+#---------------------------------------------------------------------------------
+# The app ships the sysmodule inside its romfs and installs it from there. That
+# copy is a build artifact of ../client-sysmodule, not something to edit or
+# commit by hand: leave it stale and the app happily installs a sysmodule that
+# no longer matches this source tree — which is silent, because both files are
+# valid and only their contents differ.
+#---------------------------------------------------------------------------------
+SYSMODULE_NSP := $(CURDIR)/../client-sysmodule/client-sysmodule.nsp
+ROMFS_NSP     := $(CURDIR)/$(ROMFS)/exefs.nsp
+
+.PHONY: $(BUILD) clean all sysmodule
 
 #---------------------------------------------------------------------------------
 all: $(BUILD)
 
-$(BUILD):
+$(BUILD): sysmodule
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+# Build the sysmodule first, then refresh the embedded copy.
+#
+# Copying alone is not enough. The NRO rule depends on the elf and the nacp,
+# never on what is inside romfs/, so a fresh exefs.nsp relinks nothing and the
+# app goes on installing the previous module — exactly the silent staleness this
+# exists to stop. Dropping the NRO is what forces the rebuild (build-all.sh does
+# the same, for the same reason).
+#
+# Missing sources are not an error — a release tarball may ship only the .nsp —
+# but skipping in silence is: the documented docker build mounts only client/
+# (docker-compose.yaml), so ../client-sysmodule is invisible there and the copy
+# would be quietly left at whatever it happened to be.
+sysmodule:
+ifneq ($(wildcard $(CURDIR)/../client-sysmodule/Makefile),)
+	@$(MAKE) --no-print-directory -C $(CURDIR)/../client-sysmodule
+	@mkdir -p $(CURDIR)/$(ROMFS)
+	@cmp -s $(SYSMODULE_NSP) $(ROMFS_NSP) || \
+		(echo "romfs ... exefs.nsp" && cp -f $(SYSMODULE_NSP) $(ROMFS_NSP) \
+			&& rm -f $(CURDIR)/$(TARGET).nro)
+else
+	@[ -f $(ROMFS_NSP) ] || (echo "error: $(ROMFS)/exefs.nsp is missing and ../client-sysmodule is not visible - build the sysmodule first (see build-all.sh)" >&2; exit 1)
+	@echo "warning: ../client-sysmodule not visible - keeping the existing $(ROMFS)/exefs.nsp, which may be stale"
+endif
 
 #---------------------------------------------------------------------------------
 clean:
